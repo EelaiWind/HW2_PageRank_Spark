@@ -21,22 +21,21 @@ object PageRank {
         // Read input file
         val inputFile = sc.textFile(inputPath, sc.defaultParallelism)
 
-        val titleAccumulator = sc.accumulator(Set[String](), "TotalTitles")(TitleAccumulatorParam)
         val nodeCountAccumulator = sc.accumulator(0, "TotalNodeCount")
 
-        inputFile.map(line => parseTitle(line)).foreach( title =>{
-            titleAccumulator += Set(title)
-            nodeCountAccumulator += 1
-            println(title)
-        })
+        val parsedTitle = inputFile.map(line => parseTitle(line))
+        parsedTitle.cache
+        parsedTitle.foreach( title =>{nodeCountAccumulator += 1})
 
-        val broadcastedTitles = sc.broadcast( titleAccumulator.value )
+        val allTitles = parsedTitle.collect()
+
+        val broadcastedTitles = sc.broadcast( allTitles )
         val broadcastedTotalNodeCount = sc.broadcast( nodeCountAccumulator.value )
 
         var graphStructure = inputFile.map(line =>{
             val initScore : Double = 1.0/broadcastedTotalNodeCount.value
             val allLinks = parseLink(line, broadcastedTitles.value)
-            ( parseTitle(line), new ScoreLinksPair(initScore,initScore, allLinks) )
+            ( parseTitle(line), (initScore,initScore, allLinks) )
         })
 
         val deadEndScoreAccumulator = sc.accumulator(0.0, "TotalDeadEndScore")
@@ -47,29 +46,29 @@ object PageRank {
         var iterationCount:Int = 0
         val loop = new Breaks;
         loop.breakable {
-        while(iterationCount<1){
+        while(iterationCount < 1){
 
             deadEndScoreAccumulator.setValue(0)
             deadEndCountAccumulator.setValue(0)
             pageRankAccumulator.setValue(0)
             convergenceErrorAccumulator.setValue(0)
 
-            graphStructure.filter(data=>{data._2.links.size==0}).foreach( data => {
-                deadEndScoreAccumulator += data._2.score
+            graphStructure.filter(data=>{data._2._3.size==0}).foreach( data => {
+                deadEndScoreAccumulator += data._2._2
                 deadEndCountAccumulator += 1
             })
 
             val broadcastedTotalDeadEndScore = sc.broadcast(deadEndScoreAccumulator.value)
 
             graphStructure = graphStructure.flatMap( data => {
-                val output = ListBuffer[ (String,ScoreLinksPair) ]();
+                val output = ListBuffer[ (String,(Double, Double, List[String])) ]();
                 val value = data._2
-
-                output +=  ( (data._1, new ScoreLinksPair(value.previousScore,0.0,value.links) ) )
-                if (value.links.size > 0){
-                    val distributedScore:Double = value.score/value.links.size
-                    value.links.foreach( link =>{
-                        output+= ( (link, new ScoreLinksPair(0.0,distributedScore, List[String]())) )
+                val links = value._3
+                output +=  ( (data._1, (value._1,0.0,links) ) )
+                if (links.size > 0){
+                    val distributedScore:Double = value._2/links.size
+                    links.foreach( link =>{
+                        output+= ( (link, (0.0,distributedScore, List[String]())) )
                     })
                 }
                 output.toList
@@ -80,11 +79,11 @@ object PageRank {
             )
 
             graphStructure.foreach( data => {
-                pageRankAccumulator += data._2.score
-                convergenceErrorAccumulator += math.abs(data._2.previousScore - data._2.score)
+                pageRankAccumulator += data._2._2
+                convergenceErrorAccumulator += math.abs(data._2._1 - data._2._2)
             })
             graphStructure = graphStructure.map( data=>{
-                (data._1, new ScoreLinksPair(data._2.score,data._2.score,data._2.links) )
+                (data._1, (data._2._2,data._2._2,data._2._3) )
             })
 
             iterationCount = iterationCount + 1
@@ -98,28 +97,28 @@ object PageRank {
             }
         }
         }
-        graphStructure.sortBy( data => (-1*data._2.score, data._1) ).map( data => data._1+"\t"+data._2.score ).saveAsTextFile(outputPath)
+        graphStructure.sortBy( data => (-1*data._2._2, data._1) ).map( data => data._1+"\t"+data._2._2 ).saveAsTextFile(outputPath)
         sc.stop();
     }
 
-    def addRankWalkAndDeadEndScore( data : (String, ScoreLinksPair), totalDeadEndScore:Double, totalNodeCount:Double ) : (String, ScoreLinksPair) ={
+    def addRankWalkAndDeadEndScore( data : (String, (Double, Double, List[String])), totalDeadEndScore:Double, totalNodeCount:Double ) : (String, (Double, Double, List[String])) ={
         val alpha:Double = 0.85
-        val newPageRank = alpha*data._2.score + ( (1-alpha) + alpha*totalDeadEndScore )/totalNodeCount
-        ( data._1, new ScoreLinksPair(data._2.previousScore, newPageRank, data._2.links) )
+        val newPageRank = alpha*data._2._2 + ( (1-alpha) + alpha*totalDeadEndScore )/totalNodeCount
+        ( data._1, (data._2._1, newPageRank, data._2._3) )
     }
 
-    def mergePageRank(v1 : ScoreLinksPair, v2 : ScoreLinksPair ) : ScoreLinksPair = {
-        if ( v1.links.size > 0 && v2.links.size > 0){
-            throw new Exception("MYERROR: Concat 2 non-empty list\n"+v1.links+"\n"+v2.links)
+    def mergePageRank(v1 : (Double, Double, List[String]), v2 : (Double, Double, List[String]) ) : (Double, Double, List[String]) = {
+        if ( v1._3.size > 0 && v2._3.size > 0){
+            throw new Exception("MYERROR: Concat 2 non-empty list\n"+v1._3+"\n"+v2._3)
         }
 
-        val newPreviousScore = v1.previousScore + v2.previousScore
-        val newScore = v1.score + v2.score
-        if ( v1.links.size > 0 ){
-            new ScoreLinksPair(newPreviousScore, newScore, v1.links)
+        val newPreviousScore = v1._1 + v2._1
+        val newScore = v1._2 + v2._2
+        if ( v1._3.size > 0 ){
+            (newPreviousScore, newScore, v1._3)
         }
         else{
-            new ScoreLinksPair(newPreviousScore, newScore, v2.links)
+            (newPreviousScore, newScore, v2._3)
         }
 
     }
@@ -134,16 +133,12 @@ object PageRank {
         }
     }
 
-    def parseLink(line : String, avalableTitles : Set[String]) : List[String] = {
+    def parseLink(line : String, avalableTitles : Array[String]) : List[String] = {
         val linkPattern = new Regex("\\[\\[(.+?)([\\|#]|\\]\\])")
-        var links = ListBuffer[String]()
-        for ( words <- linkPattern.findAllIn(line).matchData ){
-            val title = capitalizeFirstLetter(covertSprcailLetter(words.group(1)))
-            if ( avalableTitles.contains(title) ){
-                links += title
-            }
-        }
-        links.toList
+        //var links = ListBuffer[String]()
+        linkPattern.findAllIn(line).matchData
+        .map(word => capitalizeFirstLetter(covertSprcailLetter(word.group(1))))
+        .filter( word => avalableTitles.contains(word) ).toList
     }
 
     def covertSprcailLetter(str : String) : String = {
@@ -158,22 +153,5 @@ object PageRank {
             str
         }
     }
-
-    object TitleAccumulatorParam extends AccumulatorParam[Set[String]] {
-        def zero(initValue : Set[String]) : Set[String] = {
-            initValue
-        }
-
-        def addInPlace(v1: Set[String], v2: Set[String]) : Set[String] = {
-            v1 ++ v2
-        }
-    }
-
-    class ScoreLinksPair( _previousScore:Double, _score:Double, _links:List[String] ) extends Serializable{
-        var previousScore:Double = _previousScore
-        var score:Double = _score
-        var links:List[String] = _links
-    }
-
 }
 
