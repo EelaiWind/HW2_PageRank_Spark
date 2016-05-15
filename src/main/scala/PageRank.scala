@@ -21,23 +21,30 @@ object PageRank {
         // Read input file
         val inputFile = sc.textFile(inputPath, sc.defaultParallelism)
 
-        val nodeCountAccumulator = sc.accumulator(0, "TotalNodeCount")
+        val broadcastedTotalNodeCount = sc.broadcast( inputFile.count() )
 
-        val parsedTitle = inputFile.map(line => parseTitle(line))
-        parsedTitle.cache
-        parsedTitle.foreach( title =>{nodeCountAccumulator += 1})
-
-        val allTitles = parsedTitle.collect()
-
-        val broadcastedTitles = sc.broadcast( allTitles )
-        val broadcastedTotalNodeCount = sc.broadcast( nodeCountAccumulator.value )
-
-        var graphStructure = inputFile.map(line =>{
-            val initScore : Double = 1.0/broadcastedTotalNodeCount.value
-            val allLinks = parseLink(line, broadcastedTitles.value)
-            ( parseTitle(line), (initScore,initScore, allLinks) )
+        // === Parse Input ===
+        var graphStructure = inputFile
+        .flatMap(line =>{
+            val title = parseTitle(line)
+            val links = parseLink(line)
+            List( (title, (true, List[String]())) ) ::: links.map( link => { ( link, (false, List[String](title) )) } )
+        })
+        .reduceByKey( (v1, v2) => ( v1._1|v2._1, v1._2:::v2._2 ) )
+        .filter( data => data._2._1 )
+        .flatMap( data=> {
+            val validLink = data._1
+            val titles = data._2._2
+            List( (validLink, List[String]()) ) ::: titles.map( title => (title,List[String](validLink)) )
+        })
+        .reduceByKey( (v1, v2) => {v1:::v2} )
+        .map( data =>{
+            val initScore = 1.0/broadcastedTotalNodeCount.value
+            (data._1, ( initScore , initScore, data._2 ) )
         })
 
+
+        // === UpdatePageRank ===
         val deadEndScoreAccumulator = sc.accumulator(0.0, "TotalDeadEndScore")
         val deadEndCountAccumulator = sc.accumulator(0,"TotalDeadEndCount")
         val pageRankAccumulator = sc.accumulator(0.0,"TotalPageRankCount")
@@ -46,12 +53,14 @@ object PageRank {
         var iterationCount:Int = 0
         val loop = new Breaks;
         loop.breakable {
-        while(iterationCount < 1){
+        while(true){
 
             deadEndScoreAccumulator.setValue(0)
             deadEndCountAccumulator.setValue(0)
             pageRankAccumulator.setValue(0)
             convergenceErrorAccumulator.setValue(0)
+
+            graphStructure.cache
 
             graphStructure.filter(data=>{data._2._3.size==0}).foreach( data => {
                 deadEndScoreAccumulator += data._2._2
@@ -78,6 +87,8 @@ object PageRank {
                 addRankWalkAndDeadEndScore(_, broadcastedTotalDeadEndScore.value, broadcastedTotalNodeCount.value)
             )
 
+            graphStructure.cache
+
             graphStructure.foreach( data => {
                 pageRankAccumulator += data._2._2
                 convergenceErrorAccumulator += math.abs(data._2._1 - data._2._2)
@@ -97,6 +108,8 @@ object PageRank {
             }
         }
         }
+
+        // === Sort Result ===
         graphStructure.sortBy( data => (-1*data._2._2, data._1) ).map( data => data._1+"\t"+data._2._2 ).saveAsTextFile(outputPath)
         sc.stop();
     }
@@ -133,12 +146,13 @@ object PageRank {
         }
     }
 
-    def parseLink(line : String, avalableTitles : Array[String]) : List[String] = {
+    def parseLink(line : String) : List[String] = {
         val linkPattern = new Regex("\\[\\[(.+?)([\\|#]|\\]\\])")
-        //var links = ListBuffer[String]()
-        linkPattern.findAllIn(line).matchData
+
+        linkPattern.findAllIn(line)
+        .matchData
         .map(word => capitalizeFirstLetter(covertSprcailLetter(word.group(1))))
-        .filter( word => avalableTitles.contains(word) ).toList
+        .toList
     }
 
     def covertSprcailLetter(str : String) : String = {
