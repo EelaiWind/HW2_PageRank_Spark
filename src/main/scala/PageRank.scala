@@ -43,7 +43,6 @@ object PageRank {
             (data._1, ( initScore , initScore, data._2 ) )
         })
 
-
         // === UpdatePageRank ===
         val deadEndScoreAccumulator = sc.accumulator(0.0, "TotalDeadEndScore")
         val deadEndCountAccumulator = sc.accumulator(0,"TotalDeadEndCount")
@@ -53,14 +52,14 @@ object PageRank {
         var iterationCount:Int = 0
         val loop = new Breaks;
         loop.breakable {
+        
+        graphStructure.cache
         while(true){
 
             deadEndScoreAccumulator.setValue(0)
             deadEndCountAccumulator.setValue(0)
             pageRankAccumulator.setValue(0)
             convergenceErrorAccumulator.setValue(0)
-
-            graphStructure.cache
 
             graphStructure.filter(data=>{data._2._3.size==0}).foreach( data => {
                 deadEndScoreAccumulator += data._2._2
@@ -86,8 +85,6 @@ object PageRank {
             .map(
                 addRankWalkAndDeadEndScore(_, broadcastedTotalDeadEndScore.value, broadcastedTotalNodeCount.value)
             )
-
-            graphStructure.cache
 
             graphStructure.foreach( data => {
                 pageRankAccumulator += data._2._2
